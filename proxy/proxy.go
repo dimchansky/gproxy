@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dimchansky/gproxy/proxy/dnsresolver"
+	"github.com/dimchansky/gproxy/proxy/dns"
 	"github.com/valyala/fasthttp"
 )
 
@@ -55,13 +55,13 @@ func addChromeProxyAuthHeader(req *fasthttp.Request) {
 
 type Proxy struct {
 	port        int
-	dnsResolver *dnsresolver.DNSResolver
+	dnsResolver *dns.Resolver
 	proxyClient *fasthttp.HostClient
 }
 
 func New(port int) (*Proxy, error) {
-	resolver := dnsresolver.New(googleDNS)
-	ips, err := resolver.LookupHost(googleHTTPSProxyName)
+	dnsResolver := dns.NewResolver(googleDNS)
+	ips, err := dnsResolver.LookupHost(googleHTTPSProxyName)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to lookup %s server IP address: %v", googleHTTPSProxyName, err)
 	}
@@ -81,7 +81,7 @@ func New(port int) (*Proxy, error) {
 		TLSConfig: tlsConfig,
 	}
 
-	return &Proxy{port: port, dnsResolver: resolver, proxyClient: client}, nil
+	return &Proxy{port: port, dnsResolver: dnsResolver, proxyClient: client}, nil
 }
 
 func (p *Proxy) Listen() error {

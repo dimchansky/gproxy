@@ -72,3 +72,5 @@ crashlytics-build.properties
 
 # Visual Studio Code
 .vscode/
+
+vendor/
