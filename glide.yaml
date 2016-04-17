@@ -1,0 +1,8 @@
+package: github.com/dimchansky/gproxy
+import:
+- package: github.com/miekg/dns
+  subpackages:
+  - github.com\miekg\dns
+- package: github.com/valyala/fasthttp
+  subpackages:
+  - github.com\valyala\fasthttp
