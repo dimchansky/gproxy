@@ -169,9 +169,9 @@ func (p *Proxy) handleHTTPSProxy(w http.ResponseWriter, req *http.Request) {
 	clientConn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 
 	go func() {
-		io.Copy(hostConn, clientConn)
+		p.copyBuffer(hostConn, clientConn)
 	}()
-	io.Copy(clientConn, hostConn)
+	p.copyBuffer(clientConn, hostConn)
 }
 
 func (p *Proxy) handleHTTPProxy(w http.ResponseWriter, req *http.Request) {
@@ -221,7 +221,7 @@ func (p *Proxy) handleHTTPProxy(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	p.copyResponse(w, resp.Body)
+	p.copyBuffer(w, resp.Body)
 	resp.Body.Close()
 	copyHeader(w.Header(), resp.Trailer)
 }
@@ -234,7 +234,7 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-func (p *Proxy) copyResponse(dst io.Writer, src io.Reader) {
+func (p *Proxy) copyBuffer(dst io.Writer, src io.Reader) {
 	var buf []byte
 	if p.BufferPool != nil {
 		buf = p.BufferPool.Get()
