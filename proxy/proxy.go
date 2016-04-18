@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/md5"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -31,6 +32,7 @@ var (
 	chromeVersionReg     = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)\.(\d+)`)
 	chromeVersionSplited = chromeVersionReg.FindStringSubmatch(chromeVersion)
 	googleDNS            = []string{"8.8.8.8", "8.8.4.4"}
+	errorNoIPResolved    = errors.New("No IP resolved")
 )
 
 func getLongInt() int {
@@ -56,7 +58,6 @@ func addChromeProxyAuthHeader(r *http.Request) {
 
 type Proxy struct {
 	port        int
-	proxyAddrs  []string
 	dnsResolver *dns.Resolver
 
 	// BufferPool optionally specifies a buffer pool to
@@ -67,17 +68,7 @@ type Proxy struct {
 
 func New(port int) (*Proxy, error) {
 	dnsResolver := dns.NewResolver(googleDNS)
-	ips, err := dnsResolver.LookupHost(googleHTTPSProxyName)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to lookup %s server IP address: %v", googleHTTPSProxyName, err)
-	}
-
-	proxyAddrs := make([]string, len(ips))
-	for i, ip := range ips {
-		proxyAddrs[i] = ip.String() + ":443"
-	}
-
-	return &Proxy{port: port, proxyAddrs: proxyAddrs, dnsResolver: dnsResolver}, nil
+	return &Proxy{port: port, dnsResolver: dnsResolver}, nil
 }
 
 func (p *Proxy) Listen() error {
@@ -127,23 +118,15 @@ func (p *Proxy) handleHTTPSProxy(w http.ResponseWriter, req *http.Request) {
 		port = "443"
 	}
 
-	hostIPs, err := p.dnsResolver.LookupHost(host)
+	hostIPAddr, err := p.resolveIPAddress(host)
 	if err != nil {
-		log.Printf("dns: failed to resolve IP for host %v: %v", host, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	if len(hostIPs) == 0 {
-		log.Printf("dns: no IP resolved for %v", host)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	hostIPAddrStr := hostIPAddr.String()
 
-	randomIP := hostIPs[rand.Intn(len(hostIPs))]
-	randomIPStr := randomIP.String()
-
-	hostConn, err := net.Dial("tcp", randomIPStr+":"+port)
+	hostConn, err := net.Dial("tcp", hostIPAddrStr+":"+port)
 	if err != nil {
 		log.Printf("http: dial error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -179,7 +162,14 @@ func (p *Proxy) handleHTTPProxy(w http.ResponseWriter, req *http.Request) {
 	*outreq = *req // includes shallow copies of maps, but okay
 
 	config := tls.Config{InsecureSkipVerify: false, ServerName: googleHTTPSProxyName}
-	proxyAddr := p.proxyAddrs[rand.Intn(len(p.proxyAddrs))]
+
+	proxyIPAddr, err := p.resolveIPAddress(googleHTTPSProxyName)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	proxyAddr := proxyIPAddr.String() + ":443"
+
 	googleProxyConn, err := tls.Dial("tcp", proxyAddr, &config)
 	if err != nil {
 		log.Printf("tls: dial error: %v", err)
@@ -224,6 +214,22 @@ func (p *Proxy) handleHTTPProxy(w http.ResponseWriter, req *http.Request) {
 	p.copyBuffer(w, resp.Body)
 	resp.Body.Close()
 	copyHeader(w.Header(), resp.Trailer)
+}
+
+func (p *Proxy) resolveIPAddress(host string) (net.IP, error) {
+	hostIPs, err := p.dnsResolver.LookupHost(host)
+	if err != nil {
+		log.Printf("dns: failed to resolve IP for host %v: %v", host, err)
+		return nil, err
+	}
+
+	if len(hostIPs) == 0 {
+		log.Printf("dns: no IP resolved for host %v", host)
+		return nil, errorNoIPResolved
+	}
+
+	randomIP := hostIPs[rand.Intn(len(hostIPs))]
+	return randomIP, nil
 }
 
 func copyHeader(dst, src http.Header) {
