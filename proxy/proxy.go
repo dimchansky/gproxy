@@ -145,7 +145,15 @@ func (p *Proxy) handleHTTPSProxy(ctx *fasthttp.RequestCtx) {
 
 	hostIPs, err := p.dnsResolver.LookupHost(host)
 	if err != nil {
-		log.Printf("dns: failed to resolve IP %v: %v", host, err)
+		log.Printf("dns: failed to resolve IP for host %v: %v", host, err)
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		return
+	}
+
+	if len(hostIPs) == 0 {
+		log.Printf("dns: no IP resolved for %v", host)
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		return
 	}
 
 	randomIP := hostIPs[rand.Intn(len(hostIPs))]
