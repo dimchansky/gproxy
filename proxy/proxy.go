@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"bytes"
+	"bufio"
 	"crypto/md5"
 	"crypto/tls"
 	"fmt"
@@ -10,13 +10,14 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httputil"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dimchansky/gproxy/proxy/dns"
-	"github.com/valyala/fasthttp"
 )
 
 const (
@@ -49,14 +50,19 @@ func authHeader() string {
 		chromeVersionSplited[4])
 }
 
-func addChromeProxyAuthHeader(req *fasthttp.Request) {
-	req.Header.Set(proxyHeaderName, authHeader())
+func addChromeProxyAuthHeader(r *http.Request) {
+	r.Header.Add(proxyHeaderName, authHeader())
 }
 
 type Proxy struct {
 	port        int
+	proxyAddrs  []string
 	dnsResolver *dns.Resolver
-	proxyClient *fasthttp.HostClient
+
+	// BufferPool optionally specifies a buffer pool to
+	// get byte slices for use by io.CopyBuffer when
+	// copying HTTP response bodies.
+	BufferPool httputil.BufferPool
 }
 
 func New(port int) (*Proxy, error) {
@@ -71,71 +77,49 @@ func New(port int) (*Proxy, error) {
 		proxyAddrs[i] = ip.String() + ":443"
 	}
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: false,
-		ServerName:         googleHTTPSProxyName,
-	}
-	client := &fasthttp.HostClient{
-		Addr:      strings.Join(proxyAddrs, ","),
-		IsTLS:     true,
-		TLSConfig: tlsConfig,
-	}
-
-	return &Proxy{port: port, dnsResolver: dnsResolver, proxyClient: client}, nil
+	return &Proxy{port: port, proxyAddrs: proxyAddrs, dnsResolver: dnsResolver}, nil
 }
 
 func (p *Proxy) Listen() error {
-	s := &fasthttp.Server{
-		Handler:        p.requestHandler,
-		ReadBufferSize: 16384,
-	}
 	addr := "127.0.0.1:" + strconv.Itoa(p.port)
-	return s.ListenAndServe(addr)
+	return http.ListenAndServe(addr, http.HandlerFunc(p.requestHandler))
 }
 
 func (p *Proxy) GetAutoConfigurationUrl() string {
 	return fmt.Sprintf("http://127.0.0.1:%d/wpad.dat", p.port)
 }
 
-var (
-	connectBytes    = []byte("CONNECT")
-	wpadDatBytes    = []byte("/wpad.dat")
-	faviconIcoBytes = []byte("/favicon.ico")
-	slashBytes      = []byte("/")
-)
-
-func (p *Proxy) requestHandler(ctx *fasthttp.RequestCtx) {
-	if bytes.Equal(ctx.Method(), connectBytes) {
-		p.handleHTTPSProxy(ctx)
+func (p *Proxy) requestHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method == "CONNECT" {
+		p.handleHTTPSProxy(w, req)
 	} else {
-		p.handleHTTP(ctx)
+		p.handleHTTP(w, req)
 	}
 }
 
-func (p *Proxy) handleHTTP(ctx *fasthttp.RequestCtx) {
-	requestURI := ctx.RequestURI()
-	log.Printf("%s %s", string(ctx.Method()), string(requestURI))
+func (p *Proxy) handleHTTP(w http.ResponseWriter, req *http.Request) {
+	log.Printf("%s %s", req.Method, req.URL)
 
-	if bytes.HasPrefix(requestURI, slashBytes) {
+	if !req.URL.IsAbs() {
 		// non-proxy request
-		if bytes.Equal(requestURI, wpadDatBytes) {
-			p.handleProxyAutoConfiguration(ctx)
-		} else if bytes.Equal(requestURI, faviconIcoBytes) {
-			ctx.SetStatusCode(fasthttp.StatusNotFound)
+		if req.URL.Path == "/wpad.dat" {
+			p.handleProxyAutoConfiguration(w, req)
+		} else if req.URL.Path == "/favicon.ico" {
+			w.WriteHeader(http.StatusNotFound)
 		} else {
 			// redirect to proxy auto-configuration script
-			ctx.RedirectBytes(wpadDatBytes, fasthttp.StatusFound)
+			http.Redirect(w, req, "/wpad.dat", http.StatusFound)
 		}
 	} else {
 		// proxy request
-		p.handleHTTPProxy(ctx)
+		p.handleHTTPProxy(w, req)
 	}
 }
 
-func (p *Proxy) handleHTTPSProxy(ctx *fasthttp.RequestCtx) {
-	hostPort := string(ctx.Host())
+func (p *Proxy) handleHTTPSProxy(w http.ResponseWriter, req *http.Request) {
+	hostPort := req.Host
 
-	log.Printf("%s %s", string(ctx.Method()), hostPort)
+	log.Printf("%s %s", req.Method, hostPort)
 
 	host, port, err := net.SplitHostPort(hostPort)
 	if err != nil {
@@ -146,13 +130,13 @@ func (p *Proxy) handleHTTPSProxy(ctx *fasthttp.RequestCtx) {
 	hostIPs, err := p.dnsResolver.LookupHost(host)
 	if err != nil {
 		log.Printf("dns: failed to resolve IP for host %v: %v", host, err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if len(hostIPs) == 0 {
 		log.Printf("dns: no IP resolved for %v", host)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -162,49 +146,119 @@ func (p *Proxy) handleHTTPSProxy(ctx *fasthttp.RequestCtx) {
 	hostConn, err := net.Dial("tcp", randomIPStr+":"+port)
 	if err != nil {
 		log.Printf("http: dial error: %v", err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer hostConn.Close()
+
+	hij, ok := w.(http.Hijacker)
+	if !ok {
+		log.Printf("Proxy does not support hijacking")
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	ctx.Hijack(func(clientConn net.Conn) {
-		defer hostConn.Close()
+	clientConn, _, e := hij.Hijack()
+	if err != nil {
+		log.Printf("Cannot hijack connection: %v", e)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
 
-		go func() {
-			io.Copy(hostConn, clientConn)
-		}()
-		io.Copy(clientConn, hostConn)
-	})
+	clientConn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 
-	ctx.SetStatusCode(fasthttp.StatusOK)
+	go func() {
+		io.Copy(hostConn, clientConn)
+	}()
+	io.Copy(clientConn, hostConn)
 }
 
-func (p *Proxy) handleHTTPProxy(ctx *fasthttp.RequestCtx) {
-	req := &ctx.Request
-	resp := &ctx.Response
+func (p *Proxy) handleHTTPProxy(w http.ResponseWriter, req *http.Request) {
+	outreq := new(http.Request)
+	*outreq = *req // includes shallow copies of maps, but okay
 
-	addChromeProxyAuthHeader(req)
+	config := tls.Config{InsecureSkipVerify: false, ServerName: googleHTTPSProxyName}
+	proxyAddr := p.proxyAddrs[rand.Intn(len(p.proxyAddrs))]
+	googleProxyConn, err := tls.Dial("tcp", proxyAddr, &config)
+	if err != nil {
+		log.Printf("tls: dial error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer googleProxyConn.Close()
 
-	if err := p.proxyClient.Do(req, resp); err != nil {
-		log.Printf("error occurred when proxying the request: %s", err)
+	outreq.Proto = "HTTP/1.1"
+	outreq.ProtoMajor = 1
+	outreq.ProtoMinor = 1
+	outreq.Close = false
+	addChromeProxyAuthHeader(outreq)
+
+	outreq.Write(googleProxyConn)
+
+	br := bufio.NewReader(googleProxyConn)
+	resp, err := http.ReadResponse(br, outreq)
+	if err != nil {
+		log.Printf("http: read response error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	copyHeader(w.Header(), resp.Header)
+
+	if len(resp.Trailer) > 0 {
+		var trailerKeys []string
+		for k := range resp.Trailer {
+			trailerKeys = append(trailerKeys, k)
+		}
+		w.Header().Add("Trailer", strings.Join(trailerKeys, ", "))
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	if len(resp.Trailer) > 0 {
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
+
+	p.copyResponse(w, resp.Body)
+	resp.Body.Close()
+	copyHeader(w.Header(), resp.Trailer)
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
 	}
 }
 
-func (p *Proxy) handleProxyAutoConfiguration(ctx *fasthttp.RequestCtx) {
-	localAddr := ctx.LocalAddr().(*net.TCPAddr)
+func (p *Proxy) copyResponse(dst io.Writer, src io.Reader) {
+	var buf []byte
+	if p.BufferPool != nil {
+		buf = p.BufferPool.Get()
+	}
+	io.CopyBuffer(dst, src, buf)
+	if p.BufferPool != nil {
+		p.BufferPool.Put(buf)
+	}
+}
 
-	ctx.Response.Header.Set("Host", localAddr.IP.String())
-	ctx.SetContentType("application/x-ns-proxy-autoconfig; charset=UTF-8")
-	ctx.Response.Header.Set("Content-Disposition", "attachment; filename=\"wpad.dat\"")
+func (p *Proxy) handleProxyAutoConfiguration(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Host", "127.0.0.1")
+	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig; charset=UTF-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"wpad.dat\"")
 
-	fmt.Fprintf(ctx, `function FindProxyForURL(url, host) {
+	fmt.Fprintf(w, `function FindProxyForURL(url, host) {
   if (!isPlainHostName(host) && 
       !shExpMatch(host, '*.local') && 
       !isInNet(dnsResolve(host), '10.0.0.0', '255.0.0.0') && 
       !isInNet(dnsResolve(host), '172.16.0.0',  '255.240.0.0') && 
       !isInNet(dnsResolve(host), '192.168.0.0',  '255.255.0.0') && 
       !isInNet(dnsResolve(host), '127.0.0.0', '255.255.255.0') ) 
-    return 'PROXY %s';
+    return 'PROXY %v:%d';
   return 'DIRECT';
 }
-`, localAddr.String())
+`, "127.0.0.1", p.port)
 }
