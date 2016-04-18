@@ -139,9 +139,8 @@ func (p *Proxy) handleHTTPSProxy(ctx *fasthttp.RequestCtx) {
 
 	host, port, err := net.SplitHostPort(hostPort)
 	if err != nil {
-		log.Printf("net: failed to split host and port of %v: %v", hostPort, err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
-		return
+		host = hostPort
+		port = "443"
 	}
 
 	hostIPs, err := p.dnsResolver.LookupHost(host)
