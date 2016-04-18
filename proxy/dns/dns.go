@@ -6,14 +6,22 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/cloudflare/golibs/lrucache"
 	"github.com/miekg/dns"
+)
+
+const (
+	defaultDNSCacheExpiry time.Duration = time.Hour
+	defaultDNSCacheSize   uint          = 8 * 1024
 )
 
 // Resolver represents a dns resolver
 type Resolver struct {
 	Servers    []string
 	RetryTimes int
+	dnsCache   *lrucache.LRUCache
 }
 
 // New initializes DnsResolver.
@@ -22,7 +30,7 @@ func NewResolver(servers []string) *Resolver {
 		servers[i] += ":53"
 	}
 
-	return &Resolver{servers, len(servers) * 2}
+	return &Resolver{servers, len(servers) * 2, lrucache.NewLRUCache(defaultDNSCacheSize)}
 }
 
 // NewFromResolvConf initializes Resolver from resolv.conf like file.
@@ -35,13 +43,22 @@ func NewFromResolvConf(path string) (*Resolver, error) {
 	for _, ipAddress := range config.Servers {
 		servers = append(servers, ipAddress+":53")
 	}
-	return &Resolver{servers, len(servers) * 2}, err
+	return &Resolver{servers, len(servers) * 2, lrucache.NewLRUCache(defaultDNSCacheSize)}, err
 }
 
 // LookupHost returns IP addresses of provied host.
 // In case of timeout retries query RetryTimes times.
 func (r *Resolver) LookupHost(host string) ([]net.IP, error) {
-	return r.lookupHost(host, r.RetryTimes)
+	if ips, ok := r.dnsCache.Get(host); ok {
+		return ips.([]net.IP), nil
+	}
+
+	ips, err := r.lookupHost(host, r.RetryTimes)
+	if err == nil {
+		r.dnsCache.Set(host, ips, time.Now().Add(defaultDNSCacheExpiry))
+	}
+
+	return ips, err
 }
 
 func (r *Resolver) lookupHost(host string, triesLeft int) ([]net.IP, error) {

@@ -3,3 +3,6 @@ import:
 - package: github.com/miekg/dns
   subpackages:
   - github.com\miekg\dns
+- package: github.com/cloudflare/golibs
+  subpackages:
+  - lrucache

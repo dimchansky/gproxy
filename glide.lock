@@ -1,6 +1,11 @@
-hash: 88bdf126314c942e210a4407d8228d529e89afc379646d7aae1554273b818aa3
-updated: 2016-04-18T22:45:19.3439045+03:00
+hash: 66a54b0b44fb16bfc41c62226d20d864499a51ab15f0debba04cfc46e4b5082f
+updated: 2016-04-18T23:33:37.9108641+03:00
 imports:
+- name: github.com/cloudflare/golibs
+  version: 5dc3e4a42ae09abdc41c37ab3dad35a6b4d8fd9b
+  subpackages:
+  - lrucache
+  - github.com\cloudflare\golibs\lrucache
 - name: github.com/miekg/dns
   version: a5cc44dc6b2eee8eddfd6581e1c6bb753ff0d176
   subpackages:
