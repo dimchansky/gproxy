@@ -118,15 +118,20 @@ func (p *Proxy) handleHTTPSProxy(w http.ResponseWriter, req *http.Request) {
 		port = "443"
 	}
 
-	hostIPAddr, err := p.resolveIPAddress(host)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	var hostIPAddrStr string
+	if ip := net.ParseIP(host); ip == nil {
+		// it's not an IP address
+		hostIPAddr, err := p.resolveIPAddress(host)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		hostIPAddrStr = hostIPAddr.String()
+	} else {
+		hostIPAddrStr = host
 	}
 
-	hostIPAddrStr := hostIPAddr.String()
-
-	hostConn, err := net.Dial("tcp", hostIPAddrStr+":"+port)
+	hostConn, err := net.Dial("tcp", net.JoinHostPort(hostIPAddrStr, port))
 	if err != nil {
 		log.Printf("http: dial error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
